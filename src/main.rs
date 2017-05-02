@@ -12,7 +12,7 @@ use std::f32;
 const SERVER_NAME: &'static str = "agf453-aaronleon-web-server/0.1";
 
 fn main() {
-	let listener = TcpListener::bind("127.0.0.1:8090").unwrap();
+	let listener = TcpListener::bind("127.0.0.1:8096").unwrap();
 
 	// accept connections and process them serially
 	for stream in listener.incoming() {
@@ -80,7 +80,7 @@ fn status_code(req: String) -> u32 {
 	if version.len() > 4 {
 		let (protocol, version_number) = version.split_at(4);
 		// NEEED TO ADD A CHECK FOR THE CORRECT VERSION NUMBER JUST TO BE SURE
-		if protocol != "HTTP" || !version_number.to_string().contains("HTTP"){
+		if protocol != "HTTP" || !version.to_string().contains("HTTP"){
 			return 400;
 		}
 	}
@@ -88,16 +88,17 @@ fn status_code(req: String) -> u32 {
 	
 	//  Checking now if the file requested is either existing and/OR accessible :---> 
 	let path_name = tokens[1];
-	let path = env::current_dir().unwrap()
-		.as_path()
-		.join(Path::new(path_name));
-	println!("formed path: {}", path.to_str().unwrap());
+	let mut path = env::current_dir().unwrap();
+	path.parent().unwrap().to_path_buf().push(path_name);
+	let total_path = (*(path.as_path())).to_str().unwrap();
+	println!("tokens: {:?}", tokens);
+	println!("formed path: {}", total_path);
 	// In case the requested file isn't acccessible then we return a 403 Forbidden error
-	if !path.is_file() && !path.is_dir(){
+	if !(*(path.as_path())).is_file() && !(*(path.as_path())).is_dir(){
 		return 403;
 	}
 	// In case the requested file doesn't exist we returrn the 404 Not Found error
-	if !path.exists() || !path.has_root() {
+	if !(*(path.as_path())).exists() || !(*(path.as_path())).has_root() {
 		return 404;
 	}
 	
@@ -124,18 +125,22 @@ fn form_response(code: u32, req: String) -> String {
 	let tokens:Vec<&str> = req.split(' ').collect();
 	let mut path_ext:String = String::new();
 	let path_name = tokens[1];
-	let path = env::current_dir().unwrap()
-		.as_path()
-		.join(Path::new(path_name));
+	let mut path = env::current_dir().unwrap();
+	path.parent().unwrap().to_path_buf().push(path_name);
+	let total_path = (*(path.as_path())).to_str().unwrap();
+	
+	// let path = env::current_dir().unwrap();
+	// 	// .join(Path::new(path_name));
+	// let total_path = (*(path.as_path())).to_str().unwrap();
 	
 	let mut file_name:PathBuf = (*(Path::new("defualt"))).to_path_buf();
 	//  Find the appropriate file name and then get its details
-	if path.is_file(){
+	if (*(path.as_path())).is_file(){
 		file_name = path.to_path_buf();
-	}else if path.is_dir(){
+	}else if (*(path.as_path())).is_dir(){
 		// let mut base_path = path.clone();
 		let options:Vec<&str> = vec!["/index.html", "/index.shtml","/index.txt"];
-		let mut path_buf = path.to_path_buf();
+		let mut path_buf = (*(path.as_path())).to_path_buf();
 		let mut temp_path:PathBuf = (*(Path::new("defualt"))).to_path_buf();
 		
 		for index in 0..options.len(){
