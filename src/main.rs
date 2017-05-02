@@ -6,11 +6,13 @@ use std::thread;
 use std::sync::Mutex;
 use std::ffi::OsString;
 use std::fs::{self, DirEntry,File};
+use std::str::FromStr;
+use std::f32;
 
 const SERVER_NAME: &'static str = "agf453-aaronleon-web-server/0.1";
 
 fn main() {
-	let listener = TcpListener::bind("127.0.0.1:8082").unwrap();
+	let listener = TcpListener::bind("127.0.0.1:8090").unwrap();
 
 	// accept connections and process them serially
 	for stream in listener.incoming() {
@@ -49,9 +51,10 @@ fn send_response(mut stream: TcpStream, req: String) {
 	let request = req.clone();
 	//Based on the type of the request, we send the appropriate response - 200, 400, 403 or 404
 	let status = status_code(request);
-	// let response_obj = form_response(status, req.clone());
+	let response_obj:String = form_response(status, req.clone());
+	println!("output: {}", response_obj);
     let response = "HTTP/1.1 200 OK\n\n<html><body>Hello, World!</body></html>";
-    stream.write_all(response.as_bytes()).expect("Returning HTTP response failed.");
+    stream.write_all(response_obj.as_bytes()).expect("Returning HTTP response failed.");
 }
 
 
@@ -76,7 +79,8 @@ fn status_code(req: String) -> u32 {
 	let version = tokens[2];
 	if version.len() > 4 {
 		let (protocol, version_number) = version.split_at(4);
-		if protocol != "HTTP" || version_number.parse::<f64>().unwrap() < 0.9 {
+		// NEEED TO ADD A CHECK FOR THE CORRECT VERSION NUMBER JUST TO BE SURE
+		if protocol != "HTTP" || !version_number.to_string().contains("HTTP"){
 			return 400;
 		}
 	}
@@ -87,7 +91,7 @@ fn status_code(req: String) -> u32 {
 	let path = env::current_dir().unwrap()
 		.as_path()
 		.join(Path::new(path_name));
-	
+	println!("formed path: {}", path.to_str().unwrap());
 	// In case the requested file isn't acccessible then we return a 403 Forbidden error
 	if !path.is_file() && !path.is_dir(){
 		return 403;
@@ -103,17 +107,17 @@ fn status_code(req: String) -> u32 {
 
 //  Depending on the status code we form the appropriate response
 fn form_response(code: u32, req: String) -> String {
-	let return_string = "HTTP/1.0".to_string();
+	let return_string = "HTTP/1.0 ".to_string();
 	//  In case we get an error or a code which was not 200 we return as needed
 	if code != 200 {
 		if code == 400{
-			return return_string + &(code.to_string()) + "Bad Request";
+			return return_string + &(code.to_string()) + " Bad Request";
 		}
 		else if code == 403{
-			return return_string + &(code.to_string()) + "Forbidden";
+			return return_string + &(code.to_string()) + " Forbidden";
 		}
 		else if code == 404{
-			return return_string + &(code.to_string()) + "Not Found";
+			return return_string + &(code.to_string()) + " Not Found";
 		}
 	}
 	//  In case the status code is 200 then we extract the correct data from the request and display the response
@@ -159,9 +163,9 @@ fn form_response(code: u32, req: String) -> String {
 	
 	// Find the data in the file
 	// let file_content = content(file_path.clone());
-	
-	return return_string + &(code.to_string())
-							+ "OK \n" + SERVER_NAME + "\n Content-type:" + &path_ext ;
+	return return_string;
+	// return return_string + &(code.to_string())
+	// 						+ "OK \n" + SERVER_NAME + "\n Content-type:" + &path_ext ;
 							// + "\nContent-length:" + &(bytes.to_string()) 
 							// +"\n" + &file_content;
 }
