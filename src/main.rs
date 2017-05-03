@@ -1,193 +1,277 @@
 use std::env;
-use std::io::{Read, Write, BufRead, BufReader};
+use std::io::{Read, Write, BufRead, BufReader, ErrorKind};
+use std::path::Path;
+use std::fs::File;
 use std::net::{TcpListener, TcpStream};
-use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::thread;
-use std::sync::Mutex;
-use std::ffi::OsString;
-use std::fs::{self, DirEntry,File};
-use std::str::FromStr;
-use std::f32;
 
-const SERVER_NAME: &'static str = "agf453-aaronleon-web-server/0.1";
+extern crate chrono;
+use chrono::prelude::*;
+
+#[derive(Debug, PartialEq, Eq)]
+struct Request {
+    method: String,
+    path: String,
+    protocol: String,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct Response {
+    status: String,
+    web_server: String,
+    content_type: String,
+    content_length: usize,
+}
 
 fn main() {
-	let listener = TcpListener::bind("127.0.0.1:8096").unwrap();
+    let listener = TcpListener::bind("127.0.0.1:8080").unwrap();
 
-	// accept connections and process them serially
-	for stream in listener.incoming() {
-		match stream {
-			Ok(stream) => {
-				handle_client(stream);
-			}
-			Err(error) => {
- 				println!("{}", error);
-			}
-		}
-	}
+    let log_file = File::create("server.log").unwrap();
+    let log = Arc::new(Mutex::new(log_file));
+
+    for stream in listener.incoming() {
+        let log = log.clone();
+        match stream {
+            Ok(mut s) => {
+                thread::spawn(move | | {
+                    handle_client(&mut s, &log);
+                });
+            }
+            Err(error) => {
+                println!("{}", error);
+            }
+        }
+    }
 }
 
 //  reads the client's requests and stops reading at an empty line (at the end of the request header)
-fn handle_client(stream: TcpStream) {
-    let mut reader = BufReader::new(stream);
-	let mut request = String::new();
-	let mut is_first_line = true;
+fn handle_client(stream: &mut TcpStream, log: &Arc<Mutex<File>>) {
+    let mut reader = BufReader::new(stream.try_clone().unwrap());
+    let mut buffer = String::new();
+    reader.read_line(&mut buffer).unwrap();
     for line in reader.by_ref().lines() {
-		// Checking if this is the first line of the client request - i.e the line containing the request parameters
-		let val = line.unwrap();
-		if is_first_line == true{
-			request = val.clone();
-			is_first_line = false;
-		}
-        if val == "" {
-            //  At the end of the header we reset the is_first_line var
-			break;
+        if line.unwrap() == "" {
+           break; 
         }
     }
-    send_response(reader.into_inner(), request);
+    if let Ok(req) = parse_request(&buffer) {
+        let res = handle_request(&req);
+        send_response(stream, &res);
+        log_request(log, &req, &res)
+    }
 }
 
-fn send_response(mut stream: TcpStream, req: String) {
-	let request = req.clone();
-	//Based on the type of the request, we send the appropriate response - 200, 400, 403 or 404
-	let status = status_code(request);
-	let response_obj:String = form_response(status, req.clone());
-	println!("output: {}", response_obj);
-    let response = "HTTP/1.1 200 OK\n\n<html><body>Hello, World!</body></html>";
-    stream.write_all(response_obj.as_bytes()).expect("Returning HTTP response failed.");
+fn send_response(stream: &mut TcpStream, res: &Response) {
+    let r = res.clone();
+    let mut output = String::new();
+
+    if r.status == "200" {
+        output = format!("HTTP/1.0 {} OK\n{}\ntext/{}\n{}\n", r.status, r.web_server, r.content_type, r.content_length);
+    }
+    else if r.status == "400" {
+        output = format!("HTTP/1.0 {} Bad Request\n{}\n", r.status, r.web_server);
+    }
+    else if r.status == "403" {
+        output = format!("HTTP/1.0 {} Forbidden\n{}\n", r.status, r.web_server);
+    }
+    else if r.status == "404" {
+        output = format!("HTTP/1.0 {} Not Found\n{}\n", r.status, r.web_server);
+    }
+    println!("RESPONSE {}", output);
+    stream.write(output.as_bytes()).expect("Sending HTTP response failed.");
 }
 
+fn log_request(log_file: &Arc<Mutex<File>>, req: &Request, res: &Response) {
+    let mut guard = log_file.lock().unwrap();
+    let timestamp = UTC::now();
 
-fn status_code(req: String) -> u32 {
-	let tokens:Vec<&str> = req.split(' ').collect();
-	//  Improperly formatted GET request: (return status code 400)
-	//  a) The HTTP request is not a GET request
-	//  b) The request has more/less than 3 spaces 
-	//  c) The last space separated word in the request is either HTTP or HTTP/1._ (anything more than 0.9)
-	
-	// Check if the request has more/less than 3 spaces 
-	if tokens.len() != 3 {
-		return 400;
-	}
-
-	// Check if request method is GET
-	if tokens[0] != "GET" {
-		return 400;
-	}
-
-	// Check if request is using HTTP protocol and version number is greater than 0.9
-	let version = tokens[2];
-	if version.len() > 4 {
-		let (protocol, version_number) = version.split_at(4);
-		// NEEED TO ADD A CHECK FOR THE CORRECT VERSION NUMBER JUST TO BE SURE
-		if protocol != "HTTP" || !version.to_string().contains("HTTP"){
-			return 400;
-		}
-	}
-	else if version != "HTTP" { return 400; }
-	
-	//  Checking now if the file requested is either existing and/OR accessible :---> 
-	let path_name = tokens[1];
-	let mut path = env::current_dir().unwrap();
-	path.parent().unwrap().to_path_buf().push(path_name);
-	let total_path = (*(path.as_path())).to_str().unwrap();
-	println!("tokens: {:?}", tokens);
-	println!("formed path: {}", total_path);
-	// In case the requested file isn't acccessible then we return a 403 Forbidden error
-	if !(*(path.as_path())).is_file() && !(*(path.as_path())).is_dir(){
-		return 403;
-	}
-	// In case the requested file doesn't exist we returrn the 404 Not Found error
-	if !(*(path.as_path())).exists() || !(*(path.as_path())).has_root() {
-		return 404;
-	}
-	
-	// If there are no errors in the request and the file requested is both existing as well accessible then return 200 OK 
-	200
+    let buffer = format!("{} {} {}\n{}\n{}\n", req.method, req.path, req.protocol, timestamp.to_string(), res.status);
+    guard.write(buffer.as_bytes()).expect("Log update failed.");
 }
 
-//  Depending on the status code we form the appropriate response
-fn form_response(code: u32, req: String) -> String {
-	let return_string = "HTTP/1.0 ".to_string();
-	//  In case we get an error or a code which was not 200 we return as needed
-	if code != 200 {
-		if code == 400{
-			return return_string + &(code.to_string()) + " Bad Request";
-		}
-		else if code == 403{
-			return return_string + &(code.to_string()) + " Forbidden";
-		}
-		else if code == 404{
-			return return_string + &(code.to_string()) + " Not Found";
-		}
-	}
-	//  In case the status code is 200 then we extract the correct data from the request and display the response
-	let tokens:Vec<&str> = req.split(' ').collect();
-	let mut path_ext:String = String::new();
-	let path_name = tokens[1];
-	let mut path = env::current_dir().unwrap();
-	path.parent().unwrap().to_path_buf().push(path_name);
-	let total_path = (*(path.as_path())).to_str().unwrap();
-	
-	// let path = env::current_dir().unwrap();
-	// 	// .join(Path::new(path_name));
-	// let total_path = (*(path.as_path())).to_str().unwrap();
-	
-	let mut file_name:PathBuf = (*(Path::new("defualt"))).to_path_buf();
-	//  Find the appropriate file name and then get its details
-	if (*(path.as_path())).is_file(){
-		file_name = path.to_path_buf();
-	}else if (*(path.as_path())).is_dir(){
-		// let mut base_path = path.clone();
-		let options:Vec<&str> = vec!["/index.html", "/index.shtml","/index.txt"];
-		let mut path_buf = (*(path.as_path())).to_path_buf();
-		let mut temp_path:PathBuf = (*(Path::new("defualt"))).to_path_buf();
-		
-		for index in 0..options.len(){
-			// temp_path = path_buf.clone();
-			path_buf.push(options[index]);
-			temp_path = path_buf.clone();
-			if temp_path.exists(){
-				file_name = temp_path.clone();
-				break;
-			}
-			temp_path = (*path_buf.parent().unwrap()).to_path_buf();
-		}
-	};
-	//  Find the various parameters of the file, required to build a proper return object:--- 
-	let file_path = file_name;
-	//  Find the extension of the file inputted
-	if file_path.extension().unwrap() == "html"{
-		path_ext = "text/html".to_string();
-	}else{
-		path_ext = "text/plain".to_string();
-	}
-	
-	//  Find the size of the file 
-	// let bytes = calculate_bytes(file_path.clone());
-	
-	// Find the data in the file
-	// let file_content = content(file_path.clone());
-	return return_string;
-	// return return_string + &(code.to_string())
-	// 						+ "OK \n" + SERVER_NAME + "\n Content-type:" + &path_ext ;
-							// + "\nContent-length:" + &(bytes.to_string()) 
-							// +"\n" + &file_content;
+fn parse_request(req_string: &str) -> Result<Request, &'static str> {
+    let tokens:Vec<&str> = req_string.split_whitespace()
+        .collect();
+    if tokens.len() == 3 {
+        let req = Request {
+            method: tokens[0].to_string(),
+            path: tokens[1].to_string(),
+            protocol: tokens[2].to_string(),
+        };
+        return Ok(req);
+    }
+    return Err("Error! Invalid request length");
 }
 
-//  Find the number of bytes in the file
-fn calculate_bytes(path: PathBuf) -> usize{
-	let mut buffer = Vec::new();
-	let f = File::open(path);
-	// read the whole file
-	f.unwrap().read_to_end(&mut buffer);
-	// Output the length
-	return buffer.len();
+fn handle_request(req: &Request) -> Response {
+    let mut path = env::current_dir().unwrap();
+    let req_path = Path::new(&req.path);
+    if !is_valid_method(&req.method) || !is_valid_protocol(&req.protocol) || !req_path.has_root() {
+        return create_error_response("400");
+    }
+
+    let relative_path = req_path.strip_prefix("/").unwrap();
+    path = path.join(relative_path);
+
+    if path.is_dir() {
+        let default_files = vec!["index.txt", "index.html", "index.shtml"];
+        for file in default_files {
+            let default_file_path = path.join(file);
+            if default_file_path.exists() {
+                path = default_file_path;
+                break;
+            }
+        }
+    }
+    if !path.is_file() {
+        return create_error_response("404");
+    }
+
+    let file = read_file(&path);
+    match file {
+        Ok(content) => {
+            let extension = path.extension().unwrap().to_str().unwrap();
+            let mut content_type = "plain".to_string();
+            if extension == "html" {
+                content_type = "html".to_string();
+            }
+            return create_success_response(&content_type, content.capacity());
+        },
+        Err(err) => {
+            if err == ErrorKind::NotFound {
+                return create_error_response("404");
+            }
+            else if err == ErrorKind::PermissionDenied {
+                return create_error_response("403");
+            }
+            return create_error_response("400");
+        },
+    }
 }
 
-//  Find the contents of the file, to display to the users
-fn content(path:PathBuf) -> String{
-	let path_buf = path.read_link().expect("read_link call failed");
-	let os = path_buf.into_os_string();
-	return os.into_string().unwrap();
+fn create_success_response(content_type: &String, content_length: usize) -> Response {
+        Response {
+            status: "200".to_string(),
+            web_server: "agf453-agl475-web-server/0.1".to_string(),
+            content_type: content_type.to_owned(),
+            content_length: content_length,
+        }
+}
+
+fn create_error_response(status: &str) -> Response {
+    let res = match status {
+        "400" => Response {
+            status: "400".to_string(),
+            web_server: "".to_string(),
+            content_type: "".to_string(),
+            content_length: 0,
+        },
+        "403" => Response {
+            status: "403".to_string(),
+            web_server: "".to_string(),
+            content_type: "".to_string(),
+            content_length: 0,
+        },
+        "404" => Response {
+            status: "404".to_string(),
+            web_server: "".to_string(),
+            content_type: "".to_string(),
+            content_length: 0,
+        },
+        _ => panic!("Invalid error code")
+    };
+
+    res
+}
+
+fn read_file(file_path: &Path) -> Result<String, ErrorKind> {
+    match File::open(file_path) {
+        Ok(mut file) => {
+            let mut buffer = String::new();
+            file.read_to_string(&mut buffer).ok();
+            Ok(buffer)
+        },
+        Err(err) => Err(err.kind()),
+    }
+}
+
+fn is_valid_method(method: &str) -> bool {
+    return method == "GET";
+}
+
+fn is_valid_protocol(protocol: &str) -> bool {
+    if protocol == "HTTP" {
+        return true;
+    }
+
+    let protocol_tokens:Vec<&str> = protocol.split('/')
+        .collect();
+
+    if protocol_tokens.len() != 2 {
+        return false;
+    }
+
+    let (protocol_name, version) = (protocol_tokens[0], protocol_tokens[1]);
+    if let Ok(version_number) = version.parse::<f64>() {
+        return protocol_name == "HTTP" && version_number >= 0.9
+    }
+
+    false
+}
+
+#[cfg(test)]
+mod server_tests {
+    use super::{Request, parse_request, is_valid_method, is_valid_protocol};
+    
+    #[test]
+    fn parse_empty_request_gives_error_test() {
+        assert_eq!(parse_request("").is_ok(), false);
+    }
+    
+    #[test]
+    fn parse_invalid_request_gives_error_test() {
+        assert_eq!(parse_request("POST /some/url HTTP 2.0").is_ok(), false);
+    }
+
+    #[test]
+    fn parse_request_returns_tokens_test() {
+        let expected = Request {
+            method: "GET",
+            path: "/some/url",
+            protocol: "HTTP/2.0",
+        };
+        assert_eq!(parse_request("GET /some/url HTTP/2.0").is_ok(), true);
+        assert_eq!(parse_request("GET /some/url HTTP/2.0").unwrap(), expected);
+    }
+
+    #[test]
+    fn get_is_valid_method_test() {
+        assert_eq!(is_valid_method("GET"), true);
+    }
+
+    #[test]
+    fn post_is_not_valid_method_test() {
+        assert_eq!(is_valid_method("POST"), false);
+    }
+
+    #[test]
+    fn http_is_valid_protocol_test() {
+        assert_eq!(is_valid_protocol("HTTP"), true);
+    }
+
+    #[test]
+    fn gibberish_is_not_valid_protocol_test() {
+        assert_eq!(is_valid_protocol("alskds/llk"), false);
+    }
+
+    #[test]
+    fn newer_http_version_is_valid_protocol_test() {
+        assert_eq!(is_valid_protocol("HTTP/1.0"), true);
+    }
+
+    #[test]
+    fn older_http_version_is_not_valid_protocol_test() {
+        assert_eq!(is_valid_protocol("HTTP/0.8"), false);
+    }
 }
