@@ -63,33 +63,6 @@ fn handle_client(stream: &mut TcpStream, log: &Arc<Mutex<File>>) {
     }
 }
 
-fn send_response(stream: &mut TcpStream, res: &Response) {
-    let r = res.clone();
-    let mut output = String::new();
-
-    if r.status == "200" {
-        output = format!("HTTP/1.0 {} OK\n{}\ntext/{}\n{}\n\n{}", r.status, r.web_server, r.content_type, r.content_length, r.data);
-    }
-    else if r.status == "400" {
-        output = format!("HTTP/1.0 {} Bad Request\n{}\n\n{}", r.status, r.web_server, r.data);
-    }
-    else if r.status == "403" {
-        output = format!("HTTP/1.0 {} Forbidden\n{}\n\n{}", r.status, r.web_server, r.data);
-    }
-    else if r.status == "404" {
-        output = format!("HTTP/1.0 {} Not Found\n{}\n\n{}", r.status, r.web_server, r.data);
-    }
-    stream.write_all(&output.as_bytes()).expect("Sending HTTP response failed.");
-}
-
-fn log_request(log_file: &Arc<Mutex<File>>, req: &Request, res: &Response) {
-    let mut guard = log_file.lock().unwrap();
-    let timestamp = UTC::now();
-
-    let buffer = format!("{} {} {}\n{}\n{}\n\n", req.method, req.path, req.protocol, timestamp.to_string(), res.status);
-    guard.write(&buffer.as_bytes()).expect("Log update failed.");
-}
-
 fn parse_request(req_string: &str) -> Result<Request, &'static str> {
     let tokens:Vec<&str> = req_string.split_whitespace()
         .collect();
@@ -132,11 +105,8 @@ fn handle_request(req: &Request) -> Response {
     match file {
         Ok(content) => {
             let extension = path.extension().unwrap().to_str().unwrap();
-            let mut content_type = "plain".to_string();
-            if extension == "html" {
-                content_type = "html".to_string();
-            }
-            return create_success_response(&content_type, content.capacity(), &content);
+            let content_type = if extension == "html" { "html" } else { "plain" };
+            return create_success_response(&content_type.to_string(), content.capacity(), &content);
         },
         Err(err) => {
             if err == ErrorKind::NotFound {
@@ -150,6 +120,40 @@ fn handle_request(req: &Request) -> Response {
     }
 }
 
+fn is_valid_method(method: &str) -> bool {
+    return method == "GET";
+}
+
+fn is_valid_protocol(protocol: &str) -> bool {
+    if protocol == "HTTP" {
+        return true;
+    }
+
+    let protocol_tokens:Vec<&str> = protocol.split('/')
+        .collect();
+
+    if protocol_tokens.len() != 2 {
+        return false;
+    }
+
+    let (protocol_name, version) = (protocol_tokens[0], protocol_tokens[1]);
+    if let Ok(version_number) = version.parse::<f64>() {
+        return protocol_name == "HTTP" && version_number >= 0.9
+    }
+
+    false
+}
+
+fn read_file(file_path: &Path) -> Result<String, ErrorKind> {
+    match File::open(file_path) {
+        Ok(mut file) => {
+            let mut buffer = String::new();
+            file.read_to_string(&mut buffer).ok();
+            Ok(buffer)
+        },
+        Err(err) => Err(err.kind()),
+    }
+}
 fn create_success_response(content_type: &String, content_length: usize, data: &String) -> Response {
         Response {
             status: "200".to_string(),
@@ -189,44 +193,37 @@ fn create_error_response(status: &str) -> Response {
     res
 }
 
-fn read_file(file_path: &Path) -> Result<String, ErrorKind> {
-    match File::open(file_path) {
-        Ok(mut file) => {
-            let mut buffer = String::new();
-            file.read_to_string(&mut buffer).ok();
-            Ok(buffer)
-        },
-        Err(err) => Err(err.kind()),
+fn send_response(stream: &mut TcpStream, res: &Response) {
+    let r = res.clone();
+    let mut output = String::new();
+
+    if r.status == "200" {
+        output = format!("HTTP/1.0 {} OK\n{}\ntext/{}\n{}\n\n{}", r.status, r.web_server, r.content_type, r.content_length, r.data);
     }
+    else if r.status == "400" {
+        output = format!("HTTP/1.0 {} Bad Request\n{}\n\n{}", r.status, r.web_server, r.data);
+    }
+    else if r.status == "403" {
+        output = format!("HTTP/1.0 {} Forbidden\n{}\n\n{}", r.status, r.web_server, r.data);
+    }
+    else if r.status == "404" {
+        output = format!("HTTP/1.0 {} Not Found\n{}\n\n{}", r.status, r.web_server, r.data);
+    }
+    stream.write_all(&output.as_bytes()).expect("Sending HTTP response failed.");
 }
 
-fn is_valid_method(method: &str) -> bool {
-    return method == "GET";
+fn log_request(log_file: &Arc<Mutex<File>>, req: &Request, res: &Response) {
+    let mut guard = log_file.lock().unwrap();
+    let timestamp = UTC::now();
+
+    let buffer = format!("{} {} {}\n{}\n{}\n\n", req.method, req.path, req.protocol, timestamp.to_string(), res.status);
+    guard.write(&buffer.as_bytes()).expect("Log update failed.");
 }
 
-fn is_valid_protocol(protocol: &str) -> bool {
-    if protocol == "HTTP" {
-        return true;
-    }
-
-    let protocol_tokens:Vec<&str> = protocol.split('/')
-        .collect();
-
-    if protocol_tokens.len() != 2 {
-        return false;
-    }
-
-    let (protocol_name, version) = (protocol_tokens[0], protocol_tokens[1]);
-    if let Ok(version_number) = version.parse::<f64>() {
-        return protocol_name == "HTTP" && version_number >= 0.9
-    }
-
-    false
-}
 
 #[cfg(test)]
 mod server_tests {
-    use super::{Request, parse_request, is_valid_method, is_valid_protocol};
+    use super::*;
     
     #[test]
     fn parse_empty_request_gives_error_test() {
@@ -241,9 +238,9 @@ mod server_tests {
     #[test]
     fn parse_request_returns_tokens_test() {
         let expected = Request {
-            method: "GET",
-            path: "/some/url",
-            protocol: "HTTP/2.0",
+            method: "GET".to_string(),
+            path: "/some/url".to_string(),
+            protocol: "HTTP/2.0".to_string(),
         };
         assert_eq!(parse_request("GET /some/url HTTP/2.0").is_ok(), true);
         assert_eq!(parse_request("GET /some/url HTTP/2.0").unwrap(), expected);
@@ -279,5 +276,101 @@ mod server_tests {
         assert_eq!(is_valid_protocol("HTTP/0.8"), false);
     }
 
+    #[test]
+    fn handle_request_bad_request_is_400_test() {
+        let req = Request {
+            method: "POST".to_string(),
+            path: "/lol.txt".to_string(),
+            protocol: "HTTP".to_string(),
+        };
 
+        let res = handle_request(&req);
+        assert_eq!(res.status, "400");
+    }
+
+    #[test]
+    fn handle_request_forbidden_is_403_test() {
+        // this test uses forbidden.txt, which I created with:
+        // touch forbidden.txt
+        // sudo chown root forbidden.txt
+        // sudo chmod 700 forbidden.txt
+        //
+        // I'm not sure how permissions work when zipping files and sending them through canvas
+        let req = Request {
+            method: "GET".to_string(),
+            path: "/forbidden.txt".to_string(),
+            protocol: "HTTP/2.0".to_string(),
+        };
+
+        let res = handle_request(&req);
+        assert_eq!(res.status, "403");
+    }
+
+    #[test]
+    fn handle_request_not_found_is_404() {
+        let req = Request {
+            method: "GET".to_string(),
+            path: "/path/does/not/exist".to_string(),
+            protocol: "HTTP/2.0".to_string(),
+        };
+
+        let res = handle_request(&req);
+        assert_eq!(res.status, "404");
+    }
+
+    #[test]
+    fn handle_request_dir_without_index_file_is_404() {
+        let req = Request {
+            method: "GET".to_string(),
+            path: "/src".to_string(),
+            protocol: "HTTP/2.0".to_string(),
+        };
+
+        let res = handle_request(&req);
+        assert_eq!(res.status, "404");
+    }
+
+    #[test]
+    fn handle_request_file_is_200() {
+        let req = Request {
+            method: "GET".to_string(),
+            path: "/lol.txt".to_string(),
+            protocol: "HTTP/2.0".to_string(),
+        };
+
+        let res = handle_request(&req);
+        assert_eq!(res.status, "200");
+    }
+
+    #[test]
+    fn handle_request_dir_with_index_file_is_200() {
+        let req = Request {
+            method: "GET".to_string(),
+            path: "/".to_string(),
+            protocol: "HTTP/2.0".to_string(),
+        };
+
+        let res = handle_request(&req);
+        assert_eq!(res.status, "200");
+    }
+
+    #[test]
+    fn handle_request_content_type_test() {
+        let req1 = Request {
+            method: "GET".to_string(),
+            path: "/index.html".to_string(),
+            protocol: "HTTP/2.0".to_string(),
+        };
+
+        let req2 = Request {
+            method: "GET".to_string(),
+            path: "/lol.txt".to_string(),
+            protocol: "HTTP/2.0".to_string(),
+        };
+        let res1 = handle_request(&req1);
+        let res2 = handle_request(&req2);
+
+        assert_eq!(res1.content_type, "html");
+        assert_eq!(res2.content_type, "plain");
+    }
 }
