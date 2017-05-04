@@ -22,6 +22,7 @@ struct Response {
     web_server: String,
     content_type: String,
     content_length: usize,
+    data: String,
 }
 
 fn main() {
@@ -67,27 +68,26 @@ fn send_response(stream: &mut TcpStream, res: &Response) {
     let mut output = String::new();
 
     if r.status == "200" {
-        output = format!("HTTP/1.0 {} OK\n{}\ntext/{}\n{}\n", r.status, r.web_server, r.content_type, r.content_length);
+        output = format!("HTTP/1.0 {} OK\n{}\ntext/{}\n{}\n\n{}", r.status, r.web_server, r.content_type, r.content_length, r.data);
     }
     else if r.status == "400" {
-        output = format!("HTTP/1.0 {} Bad Request\n{}\n", r.status, r.web_server);
+        output = format!("HTTP/1.0 {} Bad Request\n{}\n\n{}", r.status, r.web_server, r.data);
     }
     else if r.status == "403" {
-        output = format!("HTTP/1.0 {} Forbidden\n{}\n", r.status, r.web_server);
+        output = format!("HTTP/1.0 {} Forbidden\n{}\n\n{}", r.status, r.web_server, r.data);
     }
     else if r.status == "404" {
-        output = format!("HTTP/1.0 {} Not Found\n{}\n", r.status, r.web_server);
+        output = format!("HTTP/1.0 {} Not Found\n{}\n\n{}", r.status, r.web_server, r.data);
     }
-    println!("RESPONSE {}", output);
-    stream.write(output.as_bytes()).expect("Sending HTTP response failed.");
+    stream.write_all(&output.as_bytes()).expect("Sending HTTP response failed.");
 }
 
 fn log_request(log_file: &Arc<Mutex<File>>, req: &Request, res: &Response) {
     let mut guard = log_file.lock().unwrap();
     let timestamp = UTC::now();
 
-    let buffer = format!("{} {} {}\n{}\n{}\n", req.method, req.path, req.protocol, timestamp.to_string(), res.status);
-    guard.write(buffer.as_bytes()).expect("Log update failed.");
+    let buffer = format!("{} {} {}\n{}\n{}\n\n", req.method, req.path, req.protocol, timestamp.to_string(), res.status);
+    guard.write(&buffer.as_bytes()).expect("Log update failed.");
 }
 
 fn parse_request(req_string: &str) -> Result<Request, &'static str> {
@@ -136,7 +136,7 @@ fn handle_request(req: &Request) -> Response {
             if extension == "html" {
                 content_type = "html".to_string();
             }
-            return create_success_response(&content_type, content.capacity());
+            return create_success_response(&content_type, content.capacity(), &content);
         },
         Err(err) => {
             if err == ErrorKind::NotFound {
@@ -150,12 +150,13 @@ fn handle_request(req: &Request) -> Response {
     }
 }
 
-fn create_success_response(content_type: &String, content_length: usize) -> Response {
+fn create_success_response(content_type: &String, content_length: usize, data: &String) -> Response {
         Response {
             status: "200".to_string(),
             web_server: "agf453-agl475-web-server/0.1".to_string(),
             content_type: content_type.to_owned(),
             content_length: content_length,
+            data: data.to_owned(),
         }
 }
 
@@ -166,18 +167,21 @@ fn create_error_response(status: &str) -> Response {
             web_server: "".to_string(),
             content_type: "".to_string(),
             content_length: 0,
+            data: "<h1>400 Bad Request</h1>".to_string(),
         },
         "403" => Response {
             status: "403".to_string(),
             web_server: "".to_string(),
             content_type: "".to_string(),
             content_length: 0,
+            data: "<h1>403 Forbidden</h1>".to_string(),
         },
         "404" => Response {
             status: "404".to_string(),
             web_server: "".to_string(),
             content_type: "".to_string(),
             content_length: 0,
+            data: "<h1>404 Not Found</h1>".to_string(),
         },
         _ => panic!("Invalid error code")
     };
@@ -274,4 +278,6 @@ mod server_tests {
     fn older_http_version_is_not_valid_protocol_test() {
         assert_eq!(is_valid_protocol("HTTP/0.8"), false);
     }
+
+
 }
